@@ -1,0 +1,502 @@
+---
+title: "Healthcare_analysis"
+format: dashboard
+theme: cosmo
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# Load packages
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse, here, janitor,gt,
+               bslib, bsicons, shiny, sf, ggspatial, 
+               ggrepel,plotly, reactable,
+               ggpubr, htmltools)
+
+# Load rgeoboundaries package which is not in CRAN
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("wmgeolab/rgeoboundaries", force = TRUE)
+
+# Load data
+hospital_data <- readxl::read_excel(here("data/Healthcare Analysis Dataset.xlsx"))
+head(hospital_data)
+
+```
+
+
+```{r}
+# Calculate new variables required for analysis
+
+# Calculate duration of hospital stay, age groups
+hospital_data1 <- hospital_data %>% 
+  mutate(hospital_days= as.integer(`Discharge Date`- `Date of Admission`),
+        age_groups= case_when(Age <18 ~ "<18 yrs",
+                    Age >=18 & Age <35 ~ "18-34 yrs",
+                    Age >=35 & Age <50 ~ "35-49 yrs",
+                    Age >=50 & Age <65 ~ "50-64 yrs",
+                    Age >=65 ~ "65+ yrs"),
+        DOA_year= year(`Date of Admission`),
+        DOA_month=month(`Date of Admission`, label = TRUE))
+```
+
+
+```{r}
+# Patient Demographics
+
+# (1) By Gender
+patient_gender <- hospital_data %>% 
+  group_by(Gender) %>% 
+  summarize(patient_number=n()) %>% 
+  ggplot(mapping=aes(x=Gender, y=patient_number, fill = Gender))+
+  geom_col(mapping=aes(text=paste("No. Patients= ", patient_number)))+
+  labs(title= "Gender Distribution among Patients",
+       x= "Gender",
+       y= "Number of Patients")+
+  theme(legend.position = "none")
+patient_gender_plotly <- ggplotly(patient_gender, tooltip = "text")
+
+# (2) By Age Groups
+patient_age_groups <- hospital_data1 %>% 
+  group_by(age_groups) %>% 
+  summarize(patient_number=n()) %>% 
+  ggplot(mapping=aes(x=age_groups, y=patient_number, fill = age_groups))+
+  geom_col(mapping=aes(text=paste("No. Patients= ", patient_number)))+
+  labs(title= "Age Distribution among Patients",
+       x= "Age Groups",
+       y= "Number of Patients")+
+  theme(legend.position = "none")
+patient_age_groups_plotly <- ggplotly(patient_age_groups, tooltip = "text")
+
+# (3) By Admission Type
+admission_type <- hospital_data %>% 
+  tabyl(`Admission Type`) %>% 
+  arrange(-n) %>% 
+  gt() %>% 
+  fmt_percent(columns = percent, decimals=1) %>% 
+  cols_label(`Admission Type`= "Admission Type",
+            n= "No. Patients",
+            percent= "Percentage") %>% 
+  tab_options(
+    table.width = pct(100), # Makes it responsive to the dashboard card width
+    row.striping.background_color = "#f9f9f9"
+  )
+
+# (4) Draw the map of hospital locations vs. patient load
+
+# Calculate total patients per hospital
+patient_load_per_hospital <- hospital_data %>% 
+  group_by(Hospital, `Hospital Longitude`, `Hospital Latitude`) %>% summarize(total_patients = n())
+
+# Change coordinates into sf object
+hospital_location <- st_as_sf(patient_load_per_hospital, coords = c("Hospital Longitude", "Hospital Latitude"), crs=4326)
+
+# Obtain the base map of US provinces
+us_map <- rgeoboundaries::geoboundaries(country = "United States",
+                              adm_lvl = 1) 
+
+hospital_map <- 
+  ggplot()+
+  geom_sf(data=us_map)+
+  geom_sf(data=hospital_location,
+          mapping=aes(size=total_patients,
+                      text = paste(Hospital, "<br>Total Patients: ", total_patients)), # add tooltip
+          color="blue",
+          alpha=0.5)+
+  labs(title = "Number of Patients across 10 Selected Hospitals in US",
+       x= "Longitude",
+       y= "Latitude")+
+  # map extent
+  coord_sf(xlim = c(-125,-70), ylim = c(24,50))
+
+# Give it to Plotly to create an interactive map 
+# Note: geom_sf_text_repel cannot be used with Plotly
+interactive_hospital_map <- ggplotly(hospital_map, tooltip = "text")
+
+# (5) Health insurance providers
+insurance_provider <- hospital_data %>% 
+  group_by(`Insurance Provider`) %>% 
+  summarize(patient_number=n()) %>% 
+  ggplot(mapping=aes(x=`Insurance Provider`, y=patient_number, fill = `Insurance Provider`))+
+  geom_col(mapping=aes(text=paste("No. Patients= ", patient_number)))+
+  labs(title= "Insurance Providers of Patients",
+       x= "Insurance Providers",
+       y= "Number of Patients")+
+  theme(legend.position = "none")
+insurance_provider_plotly <- ggplotly(insurance_provider, tooltip = "text")
+```
+
+```{r}
+# Patient Admission across Years (2020-2023)
+admission_trend1 <- hospital_data1 %>% 
+  filter(DOA_year != "2019" & DOA_year!= "2024") %>% 
+  group_by(DOA_year) %>% 
+  summarize(patient_number=n())
+  
+admission_trendline1 <- ggplot(data=admission_trend1,
+       mapping=aes(x=DOA_year,y=patient_number, 
+                   group = 1, 
+                   text = paste0("No. patients= ", patient_number)))+ 
+geom_line()+
+geom_point()+
+labs(title = "Admissions Trend (2020-2023)",
+     x= "Year",
+     y= "No. Admitted Patients")
+ 
+admission_trendline1_plot <- ggplotly(admission_trendline1, tooltip = "text") 
+
+# Patient Admission across Months (2020-2023)
+admission_trend2 <- hospital_data1 %>% 
+  filter(DOA_year != "2019" & DOA_year!= "2024") %>% 
+  group_by(DOA_month) %>% 
+  summarize(patient_number=n())
+  
+admission_trendline2 <- ggplot(data=admission_trend2,
+       mapping=aes(x=DOA_month,y=patient_number, 
+                   group = 1, #treat all those individual months as part of one single, interconnected group
+                   text = paste0("No. patients= ", patient_number)))+ 
+geom_line()+
+geom_point()+
+labs(title = "Admissions Trend by Month (2020-2023)",
+     x= "Month",
+     y= "No. Admitted Patients")
+ 
+admission_trendline2_plot <- ggplotly(admission_trendline2, tooltip = "text") 
+
+# Medical Conditions
+
+medical_conditions <- hospital_data1 %>% 
+  tabyl(`Medical Condition`) %>% 
+  arrange(-n) %>% 
+  gt() %>% 
+  fmt_percent(columns = percent, decimals=1) %>% 
+  cols_label(`Medical Condition`= "Medical Condition",
+            n= "Patient Count",
+            percent= "Percentage") %>% 
+  tab_options(
+    table.width = pct(100), # Makes it responsive to the dashboard card width
+    row.striping.background_color = "#f9f9f9"
+  )
+
+
+# Factors Influencing Hospital Stay (LOS)
+
+# Compare hospital stay among different medical conditions
+LOS_by_med <- ggplot(data=hospital_data1,
+       mapping=aes(x=`Medical Condition`, y=hospital_days,
+                   fill = `Medical Condition`,
+                   text=paste0("")))+
+  geom_boxplot()+
+  stat_summary(fun = "mean",
+               geom = "point",
+               size = 3,
+               shape = 23,
+               fill = "white")+
+  stat_compare_means(
+    method = "anova",
+    label.y = max(hospital_data1$hospital_days, na.rm = TRUE) * 1.05)+
+  labs(title = "Comparison of Hospital Stay by Medical Conditions",
+       x= "Medical Condition",
+       y= "Length of Stay (Days)")+
+  theme(legend.position = "none")
+LOS_by_med_plotly <- ggplotly(LOS_by_med, tooltip = "text")
+
+# Compare hospital stay among different age groups
+LOS_by_age <- ggplot(data=hospital_data1,
+       mapping=aes(x=age_groups, y=hospital_days,
+                   fill = age_groups,
+                   text=paste0("")))+
+  geom_boxplot()+
+  stat_summary(fun = "mean",
+               geom = "point",
+               size = 3,
+               shape = 23,
+               fill = "white")+
+  stat_compare_means(
+    method = "anova",
+    label.y = max(hospital_data1$hospital_days, na.rm = TRUE) * 1.05)+
+  labs(title = "Comparison of Hospital Stay by Age Groups",
+       x= "Age Groups",
+       y= "Length of Stay (Days)")+
+  theme(legend.position = "none")
+ LOS_by_age_plotly <- ggplotly(LOS_by_age, tooltip = "text")
+```
+
+```{r}
+# Cost Analysis
+
+# Average Billing Amount
+average_cost <- hospital_data %>% 
+  summarize(mean_cost=mean(`Billing Amount`)) %>% 
+  round(2)
+
+# Highest Billing Amount
+highest_cost <- hospital_data %>% 
+  arrange(-`Billing Amount`) %>% 
+  head(1) %>% 
+  pull(`Billing Amount`) %>% 
+  round(2)
+
+# Lowest Billing Amount
+lowest_cost <- hospital_data %>% 
+  filter(`Billing Amount`>0) %>% 
+  arrange(`Billing Amount`) %>% 
+  head(1) %>% 
+  pull(`Billing Amount`) %>% 
+  round(2)
+
+# Association between cost and hospital stay
+
+# 1. Summarize data
+plot_data <- hospital_data1 %>%
+  filter(`Billing Amount`>0) %>% 
+  group_by(hospital_days) %>% 
+  summarize(mean_cost = mean(`Billing Amount`, na.rm = TRUE))
+
+# 2. Compute Pearson correlation manually
+cor_test <- cor.test(plot_data$hospital_days, plot_data$mean_cost, method = "pearson")
+
+# 3. Format the text exactly
+cor_label <- paste0("R = ", round(cor_test$estimate, 2), 
+                    ", p = ", round(cor_test$p.value, 2))
+
+# 4. Build the plot using geom_text instead of stat_cor
+stay_cost_association <- ggplot(plot_data, aes(x = hospital_days, y = mean_cost)) +
+  geom_point() +
+  geom_smooth(method = "glm", se = FALSE, colour = "red",
+              aes(text=paste0(""))) +
+  # Add the text manually at the top left of the graph
+  annotate("text", 
+           x = min(plot_data$hospital_days) + 4, 
+           y = max(plot_data$mean_cost), 
+           label = cor_label,
+           size = 4) +
+  labs(title = "Association between Cost and Hospital Stay",
+       x = "Number of Hospital Days",
+       y = "Mean Cost (USD)")
+
+# 5. Convert to plotly
+stay_cost_association_plotly <- ggplotly(stay_cost_association, tooltip = "text")
+
+
+# Association between cost and medical condition
+medcon_cost_association <- hospital_data %>% 
+  filter(`Billing Amount`>0) %>%
+  ggplot(mapping=aes(x=`Medical Condition`,y=`Billing Amount`, fill=`Medical Condition`, text=paste0("")))+
+  geom_boxplot()+
+  stat_summary(fun = "mean",
+               geom = "point",
+               size = 3,
+               shape = 23,
+               fill = "white")+
+  stat_compare_means(
+    method = "anova",
+    label.y = max(hospital_data$`Billing Amount`, na.rm = TRUE) * 1.05)+
+  labs(title = "Association between Cost and Medical Condition",
+       x= "Medical Condition",
+       y= "Cost (USD)")+
+  theme(legend.position = "none")
+
+medcon_cost_association_plotly <- ggplotly(medcon_cost_association, tooltip = "text")
+
+# Association between cost and test results
+test_cost_association <- hospital_data %>% 
+  filter(`Billing Amount`>0) %>% 
+  ggplot(mapping=aes(x=`Test Results`,y=`Billing Amount`, fill=`Test Results`, text=paste0("")))+
+  geom_boxplot()+
+  stat_summary(fun = "mean",
+               geom = "point",
+               size = 3,
+               shape = 23,
+               fill = "white")+
+  stat_compare_means(
+    method = "anova",
+    label.y = max(hospital_data$`Billing Amount`, na.rm = TRUE) * 1.05) +
+  labs(title = "Association between Cost and Test Result",
+       x= "Test Result",
+       y= "Cost (USD)")+
+  theme(legend.position = "none")
+
+test_cost_association_plotly <- ggplotly(test_cost_association, tooltip = "text")
+
+# Association between cost and admission type
+admtype_cost_association <- hospital_data %>% 
+  filter(`Billing Amount`>0) %>%
+  ggplot(mapping=aes(x= `Admission Type`,y=`Billing Amount`, fill=`Admission Type`, text=paste0("")))+
+  geom_boxplot()+
+  stat_summary(fun = "mean",
+               geom = "point",
+               size = 3,
+               shape = 23,
+               fill = "white")+
+  stat_compare_means(
+    method = "anova",
+    label.y = max(hospital_data$`Billing Amount`, na.rm = TRUE) * 1.05) +
+  labs(title = "Association between Cost and Admission Type",
+       x= "Admission Type",
+       y= "Cost (USD)")+
+  theme(legend.position = "none")
+
+admtype_cost_association_plotly <- ggplotly(admtype_cost_association, tooltip = "text")
+```
+
+
+# About Project
+
+**Overview** 
+
+This project explored 55,500 patient records from 10 major U.S. hospitals (2019–2024) to uncover trends and optimize healthcare outcomes.
+
+**Research Questions**
+
+- What are the demographic characteristics of the patient population across the 10 major US hospitals?
+- What are the temporal trends in patient admissions over the study period?
+- What is the distribution of hospital stay duration, and which factors drive this variation?
+- What is the range of total medical costs, and what factors are associated with cost variation?
+
+**Methods, Tools and R Packages Used**
+
+**Methods:** Descriptive Statistics alongside some Statistical Tests where relevant to explore associations between exposure variables and outcome variables (length of stay, billing amount).
+
+**Tools:** R and Quarto
+
+**R packages:** tidyverse, here, janitor,gt,
+                bslib, bsicons, shiny, sf, ggspatial, 
+                ggrepel,plotly, reactable, ggpubr,
+                rgeoboundaries, htmltools
+
+# Demographics
+
+## Row1 {height=30%}
+
+### {width=30%}
+```{r}
+patient_gender_plotly
+```
+### {width=40%}
+```{r}
+patient_age_groups_plotly
+```
+### {width=30%}
+```{r}
+admission_type
+```
+
+## Row2 {height=70%}
+
+```{r title= "Healthcare Providers"}
+interactive_hospital_map
+```
+
+```{r title="Health Insurance Providers"}
+insurance_provider_plotly
+```
+
+
+
+
+# Admission Analysis
+
+## Row1 {height=50%}
+
+### {width=30%}
+```{r}
+admission_trendline1_plot
+```
+### {width=40%}
+```{r}
+admission_trendline2_plot
+```
+### {width=30%}
+```{r}
+medical_conditions
+```
+
+
+## Row2 {height=50%}
+
+```{r}
+LOS_by_med_plotly
+```
+
+```{r}
+LOS_by_age_plotly
+```
+
+
+# Cost Analysis
+
+## Row1 {height=15%}
+
+```{r}
+value_box(
+  title = "Average Cost (USD)",
+  value = HTML(paste0("<span style='font-size: 0.8em;'>", average_cost, "</span>")),
+  showcase = bsicons::bs_icon("arrow-right-square-fill"),
+  theme = value_box_theme(bg="#e5eb34"),
+  max_height = "110px"
+)
+```
+
+```{r}
+value_box(
+  title = "Highest Cost (USD)",
+  value = HTML(paste0("<span style='font-size: 0.8em;'>", highest_cost, "</span>")),
+  showcase = bsicons::bs_icon("arrow-up-square-fill"),
+  theme = value_box_theme(bg="#7197eb"),
+  max_height = "110px"
+)
+```
+
+```{r}
+value_box(
+  title = "Lowest Cost (USD)",
+  value = HTML(paste0("<span style='font-size: 0.8em;'>", lowest_cost, "</span>")),
+  showcase = bsicons::bs_icon("arrow-down-square-fill"),
+  theme = value_box_theme(bg="#d4531c"),
+  max_height = "110px"
+)
+```
+
+## Row2 {height=42.5%}
+
+```{r}
+stay_cost_association_plotly
+```
+
+```{r}
+medcon_cost_association_plotly
+```
+
+## Row3 {height=42.5%}
+
+```{r}
+test_cost_association_plotly
+```
+
+```{r}
+admtype_cost_association_plotly
+```
+
+# About data
+
+The data used in the dashboard comes from Onyx Data DNA Challenges (Apr, 2025). For more information, check the official website [here](https://datadna.onyxdata.co.uk/challenges/). The dataset is shown below and can be downloaded as a csv file.
+
+```{r}
+
+library(htmltools)
+
+htmltools::browsable(
+  tagList(
+    reactable(
+      hospital_data,
+      elementId = "hospital_data_table",
+      searchable = T,
+      filterable = T)))
+tags$button("Download as CSV", onclick = "Reactable.downloadDataCSV('hospital_data_table')")
+
+```
+
